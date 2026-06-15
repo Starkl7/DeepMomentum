@@ -1,5 +1,9 @@
 # DeepMomentum
 
+![Python](https://img.shields.io/badge/python-3.14-blue)
+![Data](https://img.shields.io/badge/data-QuantConnect--ohlcv-orange)
+![Status](https://img.shields.io/badge/status-research-lightgrey)
+
 Quantitative long-short equity strategy on the Russell 2000, developed
 progressively from a classical momentum baseline through ML-enhanced
 reclassification.
