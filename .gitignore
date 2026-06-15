@@ -1,0 +1,10 @@
+/data/*
+/logs/*
+*.json
+
+/DeepMomentum/.idea/*
+/DeepMomentum/.vscode/*
+/DeepMomentum/phase3_1.py
+/DeepMomentum/phase3_2.py
+/DeepMomentum/*.ipynb
+*.DS_STORE
