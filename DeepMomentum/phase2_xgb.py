@@ -101,7 +101,7 @@ class Phase2XGBoostMomentum(QCAlgorithm):
             self.N_FEAT_RAW = 15
 
         self.SetStartDate(2009, 8, 1)   # IWM data available from ~Nov 2010; 24-month warmup → live from Oct 2012
-        self.SetEndDate(2024, 12, 31)
+        self.SetEndDate(2025, 12, 31)
         self.SetCash(10_000_000)
 
         self.UniverseSettings.Resolution = Resolution.Daily
@@ -127,9 +127,12 @@ class Phase2XGBoostMomentum(QCAlgorithm):
         self._rebalance_log = []   # (date, n_gw, n_gl)
         self._diag_log      = []   # monthly diagnostic dicts
         self._prev_quads    = None  # {sym: (quad_label, prev_price)} for realized-return tracking
+        self._last_pos_snapshot = []   # last rebalance positions, flushed in OnEndOfAlgorithm
+        self._daily_values      = deque(maxlen=63)  # daily portfolio values for vol scaling
 
-        # SPY rolling window for beta computation
+        # SPY / IWM rolling windows
         self._spy_bars = RollingWindow[TradeBar](63)
+        self._iwm_bars = RollingWindow[TradeBar](273)  # 12-month market state signal
 
         self.Schedule.On(
             self.DateRules.MonthStart("SPY"),
@@ -154,10 +157,15 @@ class Phase2XGBoostMomentum(QCAlgorithm):
         for sym, window in self._bars.items():
             if data.Bars.ContainsKey(sym):
                 window.Add(data.Bars[sym])
-        # SPY for beta computation
+        # SPY / IWM anchor bars
         for sym in self._anchor_syms:
-            if sym.Value == "SPY" and data.Bars.ContainsKey(sym):
-                self._spy_bars.Add(data.Bars[sym])
+            if data.Bars.ContainsKey(sym):
+                if sym.Value == "SPY":
+                    self._spy_bars.Add(data.Bars[sym])
+                elif sym.Value == "IWM":
+                    self._iwm_bars.Add(data.Bars[sym])
+        # Daily portfolio value for vol scaling
+        self._daily_values.append(float(self.Portfolio.TotalPortfolioValue))
 
     # ── monthly rebalance ─────────────────────────────────────────────────────
 
@@ -194,7 +202,28 @@ class Phase2XGBoostMomentum(QCAlgorithm):
             self._prev_quads = None
             return
 
+        # ── GL / BW leg gating (persistence filter) ──────────────────────────
+        gl_active, bw_active = self._QuadrantGates()
+        if not gl_active:
+            long_idx  = quads['gw']
+        if not bw_active:
+            short_idx = quads['bl']
+
+        if not long_idx or not short_idx:
+            self.Log(f"{self.Time:%Y-%m}: empty book after gating — skip")
+            self._prev_quads = None
+            return
+
         targets = self._TargetWeights(snap, long_idx, short_idx)
+
+        # ── vol scaling + market state (v3+i7) ────────────────────────────────
+        mkt_12m, mkt_up = self._MarketState()
+        cap             = 1.5 if mkt_12m > 0.20 else 1.2
+        vol_scale       = self._VolScale(max_scale=cap)
+        if not mkt_up:
+            vol_scale = min(vol_scale, 1.0)
+        exposure        = 1.0 if mkt_up else 0.5
+        effective_scale = vol_scale * exposure
 
         # Exit stale positions
         for sym in list(self.Portfolio.Keys):
@@ -203,19 +232,23 @@ class Phase2XGBoostMomentum(QCAlgorithm):
 
         # Enter / resize
         for sym, w in targets.items():
-            self.SetHoldings(sym, w)
+            self.SetHoldings(sym, w * effective_scale)
 
         # ── diagnostics ──────────────────────────────────────────────────────
-        self._LogDiagnostics(snap, h_idx, l_idx, quads['gw'], quads['gl'], probs, targets)
+        self._LogDiagnostics(snap, h_idx, l_idx, quads['gw'], quads['gl'], probs, targets,
+                             gl_active=gl_active, bw_active=bw_active, vol_scale=effective_scale)
 
-        n_gw, n_gl = len(quads['gw']), len(quads['gl'])
-        n_bw, n_bl = len(quads['bw']), len(quads['bl'])
+        n_gw = len(quads['gw'] & long_idx)
+        n_gl = len(quads['gl'] & long_idx)
+        n_bw = len(quads['bw'] & short_idx)
+        n_bl = len(quads['bl'] & short_idx)
         self._rebalance_log.append((self.Time, n_gw + n_gl, n_bw + n_bl))
         self.Log(
             f"{self.Time:%Y-%m}  "
-            f"LONG={len(long_idx)} (GW={n_gw} GL={n_gl})  "
-            f"SHORT={len(short_idx)} (BW={n_bw} BL={n_bl})  "
-            f"train={len(self._label_buf)}mo"
+            f"LONG={len(long_idx)} (GW={n_gw} GL={n_gl}{'*' if not gl_active else ''})  "
+            f"SHORT={len(short_idx)} (BW={n_bw} BL={n_bl}{'*' if not bw_active else ''})  "
+            f"mkt={'UP' if mkt_up else 'DN'}({mkt_12m:+.0%})  "
+            f"scale={effective_scale:.2f}x  train={len(self._label_buf)}mo"
         )
 
         # Store all four quadrant assignments for next month's realized-return check
@@ -225,6 +258,21 @@ class Phase2XGBoostMomentum(QCAlgorithm):
         for i in quads['gl']: self._prev_quads[syms[i]] = ('GL', float(prices[i]))
         for i in quads['bw']: self._prev_quads[syms[i]] = ('BW', float(prices[i]))
         for i in quads['bl']: self._prev_quads[syms[i]] = ('BL', float(prices[i]))
+
+        # Cache this rebalance's positions; only the last one is kept
+        moms = snap['mom']
+        self._last_pos_snapshot = []
+        for quad_label, idx_set, direction in [
+            ('GW', quads['gw'] & long_idx,  'LONG'),
+            ('GL', quads['gl'] & long_idx,  'LONG'),
+            ('BW', quads['bw'] & short_idx, 'SHORT'),
+            ('BL', quads['bl'] & short_idx, 'SHORT'),
+        ]:
+            for i in idx_set:
+                sym = syms[i]
+                self._last_pos_snapshot.append(
+                    f"POS|{self.Time:%Y-%m}|{sym.Value}|{direction}|{quad_label}|{moms[i]:.4f}|{abs(targets.get(sym, 0.0)) * effective_scale:.6f}"
+                )
 
     # ── snapshot (feature extraction + cross-sectional ranking) ───────────────
 
@@ -485,11 +533,9 @@ class Phase2XGBoostMomentum(QCAlgorithm):
 
     # ── portfolio construction ─────────────────────────────────────────────────
 
-    def _TargetWeights(self, snap, long_idx, short_idx):
+    def _TargetWeights(self, snap, long_idx, short_idx, probs=None):
         """
         Equal-weighted, dollar-neutral: 50% long / 50% short of NAV.
-        long_idx  = Good Winners ∪ Good Losers
-        short_idx = Bad Winners  ∪ Bad Losers
         """
         syms = snap['syms']
         w_long  =  0.5 / len(long_idx)  if long_idx  else 0.0
@@ -498,9 +544,57 @@ class Phase2XGBoostMomentum(QCAlgorithm):
         weights.update({syms[i]: w_short for i in short_idx})
         return weights
 
+    # ── leg gating, market state & vol scaling ───────────────────────────────
+
+    def _QuadrantGates(self):
+        """
+        GL active  → rolling 2-month mean ret_gl > 0  (reversal working → long GL)
+        GL inactive→ drop GL, concentrate in GW only
+        BW active  → rolling 2-month mean ret_bw > 0  (still running hot → short BW)
+        BW inactive→ drop BW, concentrate in BL only
+        Defaults to True (leg included) when fewer than 1 month of history.
+        """
+        if not self._diag_log:
+            return True, True
+        window    = self._diag_log[-2:]
+        gl_vals   = [d['ret_gl'] for d in window if not np.isnan(d.get('ret_gl', np.nan))]
+        bw_vals   = [d['ret_bw'] for d in window if not np.isnan(d.get('ret_bw', np.nan))]
+        gl_active = float(np.mean(gl_vals)) > 0 if gl_vals else True
+        bw_active = float(np.mean(bw_vals)) > 0 if bw_vals else True
+        return gl_active, bw_active
+
+    def _MarketState(self):
+        """
+        IWM 12-month return as market regime signal (Cooper et al. 2004).
+        Returns (mkt_12m, is_up). Defaults to (0.0, True) with < 252 bars.
+        """
+        if self._iwm_bars.Count < 252:
+            return 0.0, True
+        mkt_12m = float(self._iwm_bars[0].Close / self._iwm_bars[251].Close - 1.0)
+        return mkt_12m, mkt_12m > 0
+
+    def _VolScale(self, target_vol=0.10, max_scale=1.2):
+        """
+        Barroso & Santa-Clara (2015) vol targeting.
+        Scale = target_vol / realized_vol_21d, capped at max_scale.
+        Returns 1.0 when insufficient history.
+        """
+        vals = list(self._daily_values)
+        if len(vals) < 22:
+            return 1.0
+        recent = vals[-22:]
+        rets   = [recent[i] / recent[i-1] - 1.0 for i in range(1, len(recent)) if recent[i-1] > 0]
+        if len(rets) < 10:
+            return 1.0
+        realized_vol = float(np.std(rets) * np.sqrt(252))
+        if realized_vol < 1e-6:
+            return 1.0
+        return min(target_vol / realized_vol, max_scale)
+
     # ── diagnostic helpers ────────────────────────────────────────────────────
 
-    def _LogDiagnostics(self, snap, h_idx, l_idx, gw_idx, gl_idx, probs, targets):
+    def _LogDiagnostics(self, snap, h_idx, l_idx, gw_idx, gl_idx, probs, targets,
+                        gl_active=True, bw_active=True, vol_scale=1.0):
         syms, prices = snap['syms'], snap['prices']
 
         # 1. Probability spread — key indicator of model signal quality
@@ -537,6 +631,9 @@ class Phase2XGBoostMomentum(QCAlgorithm):
             'net_beta':   long_beta + short_beta if not (np.isnan(long_beta) or np.isnan(short_beta)) else np.nan,
             'n_gw':       len(gw_idx),
             'n_gl':       len(gl_idx),
+            'gl_gated':   not gl_active,
+            'bw_gated':   not bw_active,
+            'vol_scale':  vol_scale,
         }
         self._diag_log.append(rec)
 
@@ -545,6 +642,7 @@ class Phase2XGBoostMomentum(QCAlgorithm):
             f"prob_spread={spread:+.3f} (GW={np.mean(p_gw):.3f} GL={np.mean(p_gl):.3f}) | "
             f"quad_ret GW={q_rets['GW']:+.3f} BW={q_rets['BW']:+.3f} GL={q_rets['GL']:+.3f} BL={q_rets['BL']:+.3f} | "
             f"beta L={long_beta:+.2f} S={short_beta:+.2f} net={rec['net_beta']:+.2f} | "
+            f"gates GL={'ON' if gl_active else 'OFF'} BW={'ON' if bw_active else 'OFF'} scale={vol_scale:.2f}x | "
             f"nan: {nan_str}"
         )
 
@@ -609,6 +707,8 @@ class Phase2XGBoostMomentum(QCAlgorithm):
     # ── end of algorithm ──────────────────────────────────────────────────────
 
     def OnEndOfAlgorithm(self):
+        for line in self._last_pos_snapshot:
+            self.Log(line)
         self.Log("=" * 65)
         self.Log("PHASE 2 — DIAGNOSTIC SUMMARY")
         self.Log(f"  Live rebalances : {len(self._diag_log)}")
@@ -653,13 +753,29 @@ class Phase2XGBoostMomentum(QCAlgorithm):
             self.Log(f"  Std  net beta   : {np.std(net_betas):.3f}  (low = stable neutrality)")
             self.Log(f"  Min / Max beta  : {min(net_betas):+.3f} / {max(net_betas):+.3f}")
 
-        # ── 4. Feature NaN rates ──────────────────────────────────────────────
-        # Per-feature NaN rates are logged each month in DIAG lines.
-        # No aggregate needed here — grep "nan:" in the log for per-feature detail.
+        # ── 4. Leg gating summary ────────────────────────────────────────────
+        n = len(self._diag_log)
+        n_gl_gated = sum(1 for d in self._diag_log if d.get('gl_gated', False))
+        n_bw_gated = sum(1 for d in self._diag_log if d.get('bw_gated', False))
+        self.Log(f"\n  [LEG GATING — 2-month rolling realized return filter]")
+        self.Log(f"  GL gated out : {n_gl_gated}/{n} months ({n_gl_gated/n:.0%})")
+        self.Log(f"  BW gated out : {n_bw_gated}/{n} months ({n_bw_gated/n:.0%})")
+
+        # ── 5. Vol scaling summary (Barroso & Santa-Clara 2015 + i7) ─────────
+        scales = [d['vol_scale'] for d in self._diag_log if not np.isnan(d.get('vol_scale', np.nan))]
+        if scales:
+            self.Log(f"\n  [VOL SCALING — target 10%, cap 1.2x (1.5x when IWM 12m>+20%)]")
+            self.Log(f"  Mean scale : {np.mean(scales):.2f}x")
+            self.Log(f"  Min  scale : {min(scales):.2f}x")
+            self.Log(f"  Max  scale : {max(scales):.2f}x")
+            self.Log(f"  Pct >1.0x  : {np.mean([s > 1.0 for s in scales]):.0%}  (levered months)")
+            self.Log(f"  Pct <1.0x  : {np.mean([s < 1.0 for s in scales]):.0%}  (de-risked months)")
+
+        # ── 6. Feature NaN rates ──────────────────────────────────────────────
         self.Log(f"\n  [FEATURE DATA QUALITY]")
         self.Log(f"  (Per-feature NaN rates logged monthly — grep 'nan:' in backtest log)")
 
-        # ── 5. Feature importances (ensemble average, final trained models) ──
+        # ── 7. Feature importances (ensemble average, final trained models) ──
         if self._models:
             fi   = np.mean([m.feature_importances_ for m in self._models], axis=0)
             top5 = sorted(zip(self.FEATURES, fi), key=lambda x: -x[1])[:5]

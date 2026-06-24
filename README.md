@@ -13,7 +13,7 @@ Inspired by Han & Qin [2023].
 **Universe:** Russell 2000 via IWM ETF constituents  
 **Capital:** $10 M starting equity  
 **Rebalance:** Monthly, 30 min after open on first trading day of month  
-**Walk-forward validation:** Oct 2012 – Dec 2024 (147 live rebalances)
+**Walk-forward validation:** Oct 2012 – Dec 2025 (159 live rebalances, LEAN v2.5.0.0.17868)
 
 Features were selected a priori from theory and domain knowledge — no
 parameters were optimized via backtesting. The full trading window is
@@ -44,46 +44,46 @@ goes long, the bottom decile goes short. Equal-weighted, dollar-neutral
 | ADV | ≥ $1 M | Ensure sufficient liquidity to execute |
 | Sector | None | Full Russell 2000 exposure |
 | Bar window | 273 bars | 13 months of daily data required for signal |
-| Warmup | 24 rebalances | Ensures identical live trading period with v1 |
+| Warmup | 24 rebalances | Ensures identical live trading period with XGBoost model |
 
-### Walk-forward validation results (Oct 2012 – Dec 2024, 147 rebalances)
+### Walk-forward validation results (Oct 2012 – Dec 2025, 159 rebalances)
 
 | Metric | Value |
 |---|---|
-| Compounding Annual Return | 3.498% |
-| Total Return | 69.99% |
-| Sharpe Ratio | 0.126 |
-| Sortino Ratio | 0.114 |
-| Max Drawdown | 24.900% |
-| Annual Std Dev | 0.091 |
-| Beta (vs IWM) | −0.066 |
-| Alpha | 0.017 |
+| Compounding Annual Return | 2.780% |
+| Total Return | 56.91% |
+| Sharpe Ratio | 0.046 |
+| Sortino Ratio | 0.043 |
+| Max Drawdown | 25.400% |
+| Annual Std Dev | 0.092 |
+| Beta (vs IWM) | −0.059 |
+| Alpha | 0.009 |
 | Win Rate / Loss Rate | 49% / 51% |
-| Profit-Loss Ratio | 1.12 |
-| Portfolio Turnover | 1.59% |
-| Total Fees | $345,583 |
-| Total Orders | 23,924 |
+| Profit-Loss Ratio | 1.11 |
+| Portfolio Turnover | 1.62% |
+| Total Fees | $372,771 |
+| Total Orders | 25,713 |
 
 ### Bimodality diagnostics
 
 We tracked the Bimodality Coefficient (BC) [Han & Qin, 2023] of the
-forward-return distribution across all 147 live rebalances:
+forward-return distribution across all 159 live rebalances (Oct 2012–Dec 2025):
 
 | Metric | Value |
 |---|---|
-| Mean fwd_BC | 0.3183 (threshold 0.555) |
-| Pct months fwd_BC > 0.555 | 3.4% |
+| Mean fwd_BC | 0.3235 (threshold 0.555) |
+| Pct months fwd_BC > 0.555 | 3.8% |
 | Min / Max fwd_BC | 0.1517 / 0.8769 |
 | Bimodality present | NO — unimodal on average |
-| Mean signal_BC (12-1 return dist) | 0.4140 |
+| Mean signal_BC (12-1 return dist) | 0.4272 |
 
 Bimodality is episodic rather than persistent: unimodal on average across the
-full walk-forward period, but appearing in ~3% of months (peak BC = 0.8769,
+full walk-forward period, but appearing in ~4% of months (peak BC = 0.8769,
 Sep 2020 COVID shock).
 
 ---
 
-## v1 Model — XGBoost Reclassifier (`phase2_xgb.py`)
+## v1 Model — XGBoost Reclassifier (pure, reference)
 
 Extends the baseline with a 10-member XGBoost ensemble that reclassifies
 momentum stocks into four quadrants. The core idea: momentum correctly
@@ -149,8 +149,10 @@ they preserve market-level magnitude.
 | Good Losers (GL) | Bottom decile | p ≥ 0.50 | **Long** |
 | Bad Losers (BL) | Bottom decile | p < 0.50 | **Short** |
 
-Long book = GW ∪ GL. Short book = BW ∪ BL. All four quadrants are always
-traded — no quadrant is skipped.
+Long book = GW ∪ GL. Short book = BW ∪ BL. In the pure v1 model all four
+quadrants are always traded. The v2 hybrid adds a persistence gate that can
+drop GL or BW when their realized returns indicate the cross-signal is failing
+(see v2 section below).
 
 ### Training setup
 
@@ -167,7 +169,9 @@ traded — no quadrant is skipped.
 | Warmup | 24 labeled months before first trade |
 | Retrain frequency | Monthly |
 
-### Walk-forward validation results (Oct 2012 – Dec 2024, 147 rebalances)
+### Walk-forward validation results (Oct 2012 – Dec 2024, 147 rebalances, LEAN v2.5.0.0.17779)
+
+Historical reference run. See Performance Comparison for current-engine equivalent.
 
 | Metric | Value |
 |---|---|
@@ -185,7 +189,7 @@ traded — no quadrant is skipped.
 | Total Fees | $590,379 |
 | Total Orders | 30,851 |
 
-### Walk-forward validation diagnostics (Oct 2012 – Dec 2024, 147 rebalances)
+### Walk-forward validation diagnostics (Oct 2012 – Dec 2024, original run)
 
 | Metric | Value | Notes |
 |---|---|---|
@@ -223,46 +227,82 @@ based on cross-sectional volatility conditions.
 
 ---
 
+## v2 Model — XGBoost + Hybrid Enhancements (`phase2_xgb.py`, current)
+
+Extends v1 with three risk-management overlays that improve Sharpe and reduce
+drawdown without modifying the core XGBoost signal. These are applied as
+post-signal portfolio construction rules — the XGBoost model is unchanged.
+
+### Enhancements
+
+**1. GL / BW leg persistence gate**  
+At each rebalance, the GL leg (long losers expected to reverse) and BW leg (short
+winners expected to fade) are individually gated on a rolling 2-month realized
+return filter. If the mean realized return of the GL book over the past 2 months
+is negative, the GL leg is dropped and capital concentrates in GW. Similarly, if
+the BW realized return is negative (our shorts are going up — a signal the
+contrarian bet is failing), BW is dropped and capital concentrates in BL.
+
+This concentrates risk in the two high-conviction momentum legs (GW, BL) during
+regimes where the XGB cross-signal is not delivering.
+
+**2. Volatility scaling (Barroso & Santa-Clara 2015)**  
+Position sizes are scaled monthly by `target_vol / realized_vol_21d`, capped at
+1.2× (or 1.5× in strong bull markets). This targets a constant 10% annualized
+portfolio volatility, scaling down exposure in high-vol regimes and moderately
+levering up in quiet periods. Prevents momentum crashes from catching the
+portfolio fully deployed.
+
+**3. Market state gate (Cooper et al. 2004)**  
+Uses the IWM 12-month return as a market regime signal. When IWM 12m return < 0
+(DOWN regime): vol scaling is capped at 1.0× (no leverage) and all position
+weights are halved (0.5× exposure). When IWM 12m > +20% (strong bull): the vol
+scaling cap is raised to 1.5×. Addresses the finding that momentum strategies
+generate nearly all their alpha in UP-market states.
+
+### Walk-forward validation results (Oct 2012 – Dec 2025, 159 rebalances)
+
+| Metric | Value |
+|---|---|
+| Compounding Annual Return | 3.859% |
+| Total Return | 86.27% |
+| Sharpe Ratio | 0.143 |
+| Sortino Ratio | 0.144 |
+| Max Drawdown | 19.900% |
+| Annual Std Dev | 0.067 |
+| Beta (vs IWM) | −0.053 |
+| Alpha | 0.014 |
+| Win Rate / Loss Rate | 51% / 49% |
+| Profit-Loss Ratio | 1.06 |
+| Portfolio Turnover | 3.05% |
+| Total Fees | $734,770 |
+| Total Orders | 33,585 |
+
+---
+
 ## Performance Comparison
 
-### Full walk-forward validation (Oct 2012 – Dec 2024, 147 rebalances)
+### Walk-forward validation comparison
 
-| Metric | Baseline | v1 (XGBoost) | Δ |
-|---|---|---|---|
-| Compounding Annual Return | 3.498% | 4.082% | +0.584 pp |
-| Sharpe Ratio | 0.126 | 0.235 | +0.109 |
-| Sortino Ratio | 0.114 | 0.234 | +0.120 |
-| Max Drawdown | 24.900% | 16.800% | −8.1 pp |
-| Annual Std Dev | 0.091 | 0.054 | −0.037 |
-| Beta (vs IWM) | −0.066 | −0.035 | +0.031 |
-| Alpha | 0.017 | 0.015 | −0.002 |
-| Portfolio Turnover | 1.59% | 2.57% | +0.98 pp |
-| Win Rate | 49% | 52% | +3 pp |
+All results on LEAN v2.5.0.0.17868, Oct 2012 – Dec 2025 (159 live rebalances).
+v1 XGBoost pure results are also provided on this engine for reference.
 
-v1 improves on all risk-adjusted metrics over the full walk-forward period. Sharpe
-nearly doubles (+0.109), max drawdown falls by 8.1 pp, and annual volatility drops
-by 40%. The CAGR improvement is modest (+0.58 pp) — the XGBoost layer adds more
-value by reducing risk than by increasing raw returns.
-
-### Sub-period breakdown (analytical)
-
-| Metric | Baseline 2012–2020 | Baseline 2021–2024 | v1 2012–2020 | v1 2021–2024 |
+| Metric | Baseline | v1 XGBoost (pure) | v2 Hybrid (final) | Δ (Baseline→v2) |
 |---|---|---|---|---|
-| CAR | 1.563% | 5.503% | 4.272% | 3.339% |
-| Sharpe | 0.033 | 0.179 | 0.418 | −0.042 |
-| Max Drawdown | 23.10% | 15.200% | 10.90% | 13.600% |
-| Annual Std Dev | 0.082 | 0.082 | 0.045 | 0.052 |
-| Beta | −0.047 | −0.058 | −0.014 | −0.041 |
-| Alpha | 0.007 | 0.017 | 0.020 | 0.000 |
+| Compounding Annual Return | 2.780% | 3.049% | **3.859%** | +1.079 pp |
+| Sharpe Ratio | 0.046 | 0.104 | **0.143** | +0.097 |
+| Sortino Ratio | 0.043 | 0.106 | **0.144** | +0.101 |
+| Max Drawdown | 25.400% | 24.200% | **19.900%** | −5.5 pp |
+| Annual Std Dev | 0.092 | 0.053 | **0.067** | −0.025 |
+| Beta (vs IWM) | −0.059 | −0.031 | **−0.053** | +0.006 |
+| Alpha | 0.009 | 0.008 | **0.014** | +0.005 |
+| Win Rate | 49% | 52% | **51%** | +2 pp |
+| Total Fees | $372,771 | $558,575 | $734,770 | — |
 
-The sub-period data explains the mechanism behind v1's full-period risk reduction.
-The 2012–2020 period showed strong outperformance (Sharpe 0.418 vs 0.033), driven
-largely by the GL reversal trade. The 2021–2024 period showed v1 underperforming
-on Sharpe (−0.042 vs 0.179) despite maintaining an L/S spread of +0.85%/mo —
-the underperformance came from net beta instability, not alpha collapse. Assessed
-over the full walk-forward window, v1's structural volatility reduction (StdDev
-0.054 vs 0.091) and drawdown reduction (16.8% vs 24.9%) dominate, producing a
-nearly doubled Sharpe ratio.
+v2 Hybrid outperforms both the baseline and pure XGBoost on all risk-adjusted metrics.
+The XGBoost reclassification (v1) alone improves CAR and Sharpe modestly; the hybrid
+enhancements (v2) further improve Sharpe (+0.039 over pure XGB) while cutting drawdown
+by 4.3 pp. The Sharpe/DD ratio: Baseline 0.18, v1 XGB 0.43, v2 Hybrid **0.72**.
 
 ---
 
@@ -270,12 +310,9 @@ nearly doubled Sharpe ratio.
 
 ```
 DeepMomentum/
-├── main.py               # Baseline — traditional momentum (Phase 1)
-├── phase2_benchmark.py   # v1 — XGBoost 4-quadrant reclassifier (Phase 2)
-├── phase3_1.py           # v2 (in progress) — MDN direct
-├── phase3_2.py           # v2 (in progress) — MDN 4-quadrant
-├── config.json           # QuantConnect project config
-├── research.ipynb        # Analysis notebook
+├── phase1_baseline.py    # Phase 1 — traditional momentum (baseline)
+├── phase2_xgb.py         # Phase 2 — XGBoost + hybrid enhancements (current, end date 2025)
+├── config.json           # QuantConnect project config (gitignored)
 └── README.md             # This file
 ```
 
@@ -283,22 +320,45 @@ DeepMomentum/
 
 ## Running on QuantConnect
 
-```bash
-# Push and run on QC cloud
-lean cloud push --project "DeepMomentum"
-lean cloud backtest "DeepMomentum" --name "baseline-wfv"
+QC requires `main.py` as the algorithm entry point. Generate it from the source
+file before each push, then launch the backtest:
 
-# Each phase file is self-contained. To run a specific version, set it
-# as the entry point in config.json (or copy/rename to main.py).
+```bash
+# Phase 2 v2 (current strategy)
+cp DeepMomentum/phase2_xgb.py DeepMomentum/main.py
+.venv/bin/lean cloud backtest <project-id> --push --name "Phase2-run"
+
+# Phase 1 baseline
+cp DeepMomentum/phase1_baseline.py DeepMomentum/main.py
+.venv/bin/lean cloud backtest <project-id> --push --name "Phase1-run"
 ```
+
+`main.py` is gitignored — only the named source files are tracked.
 
 ---
 
 ## Citations
 
-**[Han & Qin, 2023]** Han, Y., & Qin, J. (2023). *Bimodality Everywhere:
-International Evidence of Deep Momentum*. SSRN Working Paper.
-
 **[Jegadeesh & Titman, 1993]** Jegadeesh, N., & Titman, S. (1993). Returns to
 Buying Winners and Selling Losers: Implications for Stock Market Efficiency.
-*Journal of Finance*, 48(1), 65–91.
+*Journal of Finance*, 48(1), 65–91.  
+*Basis for the 12-1 month cross-sectional momentum signal.*
+
+**[Han & Qin, 2023]** Han, Y., & Qin, J. (2023). *Bimodality Everywhere:
+International Evidence of Deep Momentum*. SSRN Working Paper.  
+*Bimodality Coefficient diagnostic used to characterise the momentum return distribution.*
+
+**[Barroso & Santa-Clara, 2015]** Barroso, P., & Santa-Clara, P. (2015). Momentum
+Has Its Moments. *Journal of Financial Economics*, 116(1), 111–120.  
+*Volatility scaling methodology: target constant realized vol, scale positions by
+`target_vol / realized_vol_21d`. Directly implemented in v2 hybrid.*
+
+**[Cooper, Gutierrez & Hameed, 2004]** Cooper, M. J., Gutierrez, R. C., & Hameed, A.
+(2004). Market States and Momentum. *Journal of Finance*, 59(3), 1345–1365.  
+*Market state gate: IWM 12-month return as UP/DOWN regime signal. Momentum profits
+concentrate in UP-market states; strategy halves exposure in DOWN regimes.*
+
+**[Daniel & Moskowitz, 2016]** Daniel, K., & Moskowitz, T. J. (2016). Momentum
+Crashes. *Journal of Financial Economics*, 122(2), 221–247.  
+*Momentum crash risk: crashes cluster in high-vol, post-bear-market periods.
+Motivates the asymmetric lever cap (no leverage in DOWN markets) in v2.*

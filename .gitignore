@@ -1,10 +1,23 @@
+# ── Backtest outputs (large binary / generated files) ──────────────────────
 /data/*
 /logs/*
+/results/*
+/docs/*
+
+# ── QC / LEAN config (machine-specific, contains empty credential fields) ──
+lean.json
 *.json
 
+# ── QC entry point (auto-generated from phase2_xgb.py before each push) ────
+/DeepMomentum/main.py
+
+# ── IDE and OS artifacts ────────────────────────────────────────────────────
 /DeepMomentum/.idea/*
 /DeepMomentum/.vscode/*
+.DS_Store
+*.DS_STORE
+
+# ── In-progress phases (not yet stable) ────────────────────────────────────
 /DeepMomentum/phase3_1.py
 /DeepMomentum/phase3_2.py
 /DeepMomentum/*.ipynb
-*.DS_STORE
