@@ -278,6 +278,59 @@ generate nearly all their alpha in UP-market states.
 | Total Fees | $734,770 |
 | Total Orders | 33,585 |
 
+### Walk-forward diagnostics (Oct 2012 – Dec 2025, 159 rebalances, LEAN v2.5.0.0.17878)
+
+#### Full-period signal quality & quadrant returns
+
+| Metric | Value | Notes |
+|---|---|---|
+| Prob spread (GW−GL) | +0.0012 | Near-zero — XGB acts as regime filter, not stock picker |
+| Pct months positive spread | 45.9% | Near chance |
+| Mean P(Good Winner) | 0.5260 | |
+| Mean P(Good Loser) | 0.5248 | |
+| GW avg monthly return | +1.58% | Longed |
+| GL avg monthly return | +1.67% | Longed — reversal trade |
+| BW avg monthly return | +1.21% | Shorted |
+| BL avg monthly return | +1.01% | Shorted |
+| Avg long book (GW+GL)/2 | +1.62%/mo | |
+| Avg short book (BW+BL)/2 | +1.11%/mo | |
+| L/S spread | +0.56%/mo | |
+| Mean net beta | −0.186 | Near-neutral |
+| Net beta std dev | 0.434 | Elevated post-2021 |
+| Net beta range | −1.52 / +0.91 | |
+| GL gated out | 60/159 months (38%) | |
+| BW gated out | 57/159 months (36%) | |
+| Mean vol scale | 1.04× | |
+| Pct levered (>1×) | 68% | |
+
+#### Sub-period split (pre-2021 vs post-2021)
+
+| Metric | Pre-2021 (N=99) | Post-2021 (N=59) |
+|---|---|---|
+| **Signal quality** | | |
+| Prob spread (GW−GL) | −0.0003 | +0.0039 |
+| Pct positive spread | 39.4% | 57.6% |
+| **Quadrant returns** | | |
+| GW avg monthly return | +1.52% | +1.22% |
+| GL avg monthly return | +2.29% | +0.38% |
+| BW avg monthly return | +1.13% | +1.12% |
+| BL avg monthly return | +1.31% | −0.01% |
+| Avg long (GW+GL)/2 | +1.91%/mo | +0.80%/mo |
+| Avg short (BW+BL)/2 | +1.22%/mo | +0.56%/mo |
+| **L/S spread** | **+0.76%/mo** | **+0.24%/mo** |
+| **Beta leakage** | | |
+| Mean net beta | −0.143 | −0.258 |
+| Net beta std dev | 0.375 | 0.522 |
+| Net beta range | −1.38 / +0.67 | −1.49 / +1.09 |
+| **Leg gating** | | |
+| GL gated out | 28/99 months (28%) | 32/59 months (54%) |
+| BW gated out | 35/99 months (35%) | 23/59 months (39%) |
+| **Vol scaling** | | |
+| Mean vol scale | 1.10× | 0.96× |
+| Pct levered (>1×) | 75% | 58% |
+
+The L/S spread compresses from +0.76%/mo pre-2021 to +0.24%/mo post-2021. The primary driver is GL (reversal leg) deterioration: +2.29%/mo pre-2021 vs +0.38%/mo post-2021. The gating mechanism responds correctly — GL is suppressed in 54% of post-2021 months vs 28% pre-2021 — but cannot fully recover the lost reversal alpha. GW holds up better (+1.22% vs +1.52%) and the short book actually improves (BL near zero post-2021, meaning shorts went down). Net beta instability also increases post-2021 (std 0.375 → 0.522), reflecting choppier regime transitions.
+
 ---
 
 ## Performance Comparison
