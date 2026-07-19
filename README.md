@@ -8,7 +8,7 @@ Quantitative long-short equity strategy on the Russell 2000, developed
 progressively from a classical momentum baseline through ML-enhanced
 reclassification.
 
-Inspired by Han & Qin [2023].
+Inspired by Han [2022]; international evidence in Han & Qin [2023].
 
 **Universe:** Russell 2000 via IWM ETF constituents  
 **Capital:** $10 M starting equity  
@@ -66,12 +66,12 @@ goes long, the bottom decile goes short. Equal-weighted, dollar-neutral
 
 ### Bimodality diagnostics
 
-We tracked the Bimodality Coefficient (BC) [Han & Qin, 2023] of the
+We tracked the Bimodality Coefficient (BC) [Han, 2022; Pfister et al., 2013] of the
 forward-return distribution across all 159 live rebalances (Oct 2012–Dec 2025):
 
 | Metric | Value |
 |---|---|
-| Mean fwd_BC | 0.3235 (threshold 0.555) |
+| Mean fwd_BC | 0.3235 (threshold 0.555 [Pfister et al., 2013]) |
 | Pct months fwd_BC > 0.555 | 3.8% |
 | Min / Max fwd_BC | 0.1517 / 0.8769 |
 | Bimodality present | NO — unimodal on average |
@@ -397,9 +397,21 @@ Buying Winners and Selling Losers: Implications for Stock Market Efficiency.
 *Journal of Finance*, 48(1), 65–91.  
 *Basis for the 12-1 month cross-sectional momentum signal.*
 
-**[Han & Qin, 2023]** Han, Y., & Qin, J. (2023). *Bimodality Everywhere:
-International Evidence of Deep Momentum*. SSRN Working Paper.  
-*Bimodality Coefficient diagnostic used to characterise the momentum return distribution.*
+**[Han, 2022]** Han, C. (2022). Bimodal Characteristic Returns and Predictability
+Enhancement via Machine Learning. *Management Science*, 68(10), 7701–7741.  
+*Primary source: introduces the bimodality of momentum returns and the ML
+reclassification approach that this project's BC diagnostic and four-quadrant
+reclassifier are built on.*
+
+**[Han & Qin, 2023]** Han, C., & Qin, C. (2023). *Deep Momentum: International
+Evidence*. SSRN Working Paper (May 10, 2023).  
+*International-evidence extension of Han (2022).*
+
+**[Pfister et al., 2013]** Pfister, R., Schwarz, K. A., Janczyk, M., Dale, R., &
+Freeman, J. B. (2013). Good things peak in pairs: A note on the bimodality
+coefficient. *Frontiers in Psychology*, 4, 700.  
+*Source of the Bimodality Coefficient statistic and its 0.555 uniform-distribution
+threshold (Sarle's BC, SAS Institute, 1990).*
 
 **[Barroso & Santa-Clara, 2015]** Barroso, P., & Santa-Clara, P. (2015). Momentum
 Has Its Moments. *Journal of Financial Economics*, 116(1), 111–120.  

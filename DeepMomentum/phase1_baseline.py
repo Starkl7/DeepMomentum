@@ -229,6 +229,7 @@ class Phase1TraditionalMomentum(QCAlgorithm):
 
     def _BimodalityCoeff(self, returns):
         """
+        Sarle's Bimodality Coefficient (SAS Institute, 1990; Pfister et al., 2013).
         BC = (skew² + 1) / (excess_kurtosis + 3(n-1)²/((n-2)(n-3)))
         BC > 0.555 indicates bimodality (uniform distribution threshold).
         """
